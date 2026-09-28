@@ -30,6 +30,11 @@ process.env.PATH = path.dirname(ffmpegPath) + ':' + (process.env.PATH || '');
 const Tesseract = require('tesseract.js');
 const pdfParse = require('pdf-parse');
 
+// ═══ TELEGRAM FORWARDER — GramJS (npm install telegram input) ═══
+const { TelegramClient } = require('telegram');
+const { StringSession } = require('telegram/sessions');
+const input = require('input');
+
 // ═══════════════════════════════════════════════════════════════
 // ═══ SHANA AUTO CONTACT SAVE — NATIVE WHATSAPP (Google නැතුව) ═══
 // ═══ RAM-friendly: module එකක් load කරන්නෙ නෑ, Map + JSON file ═══
@@ -177,7 +182,13 @@ const config = {
     NEWSLETTER_MESSAGE_ID: '428',
     OTP_EXPIRY: 300000,
     OWNER_NUMBER: '94728348795',
-    CHANNEL_LINK: ''
+    CHANNEL_LINK: '',
+
+    // ═══ TELEGRAM → WHATSAPP CHANNEL FORWARDER ═══
+    TG_API_ID: 31672305,                              // << CHANGE: ඔයාගේ api_id එක මෙතන දාන්න
+    TG_API_HASH: '73fcd456cf05519b477d147d8406fd82',                  // << CHANGE: ඔයාගේ api_hash එක මෙතන දාන්න
+    TG_GROUP_ID: -1003736315646,                   // << CHANGE: ඔයා හොයාගත්ත Telegram group ID එක මෙතන දාන්න
+    TG_FORWARD_TO_CHANNEL: '0029VbDdDNZLNSaA0qgS5r07'  // << CHANGE: ඔයාගේ WhatsApp චැනල් JID එක මෙතන දාන්න
 };
 
 const replyFq = (text) => reply(text);
@@ -563,6 +574,98 @@ async function ytdlpDownload(url, mode, outPath) {
     throw new Error('All download methods failed');
 }
 
+// ═══════════════════════════════════════════════════════════════
+// ═══ TELEGRAM GROUP → WHATSAPP CHANNEL AUTO FORWARDER ═══
+// ═══ ඔයාගේම TG account එකෙන් group messages කියවලා ═══
+// ═══ WhatsApp Channel එකට auto forward කරනවා (admin ඕන නෑ) ═══
+// ═══════════════════════════════════════════════════════════════
+const TG_SESSION_PATH = path.join(SESSION_BASE_PATH, 'tg_session.txt');
+let tgClientStarted = false;
+
+async function setupTelegramForwarder(socket, sanitizedNumber) {
+    if (tgClientStarted) {
+        console.log('📌 [TG FORWARD] Telegram client already running — skipping');
+        return;
+    }
+    tgClientStarted = true;
+
+    try {
+        let savedSession = '';
+        try {
+            if (fs.existsSync(TG_SESSION_PATH)) {
+                savedSession = fs.readFileSync(TG_SESSION_PATH, 'utf8').trim();
+                console.log('✅ [TG FORWARD] Saved Telegram session loaded');
+            }
+        } catch (_) {}
+
+        const tgClient = new TelegramClient(
+            new StringSession(savedSession),
+            config.TG_API_ID,
+            config.TG_API_HASH,
+            { connectionRetries: 5 }
+        );
+
+        // පළවෙනි වතාවට විතරයි phone + login code අහන්නේ (console එකේ)
+        await tgClient.start({
+            phoneNumber: async () => input.text('📱 [TG FORWARD] Telegram phone number (+947xxxxxxxx): '),
+            password: async () => input.password('🔒 [TG FORWARD] 2FA password (තියෙනවා නම්): '),
+            phoneCode: async () => input.text('💬 [TG FORWARD] Telegram එකෙන් ආපු code එක: '),
+            onError: (err) => console.error('❌ [TG FORWARD] login error:', err.message)
+        });
+
+        console.log('✅ [TG FORWARD] Telegram logged in:', tgClient.session.userId || 'user');
+
+        // session එක file එකේ save කරනවා — ආයේ login වෙන්න ඕන නෑ
+        try {
+            fs.writeFileSync(TG_SESSION_PATH, tgClient.session.save());
+        } catch (e) {
+            console.warn('⚠️ [TG FORWARD] session save error:', e.message);
+        }
+
+        // ═══ Group messages listen කරනවා ═══
+        tgClient.addEventHandler(async (update) => {
+            try {
+                const msg = update.message;
+                if (!msg || !msg.message) return;
+
+                // group ID එක match වෙනවද බලනවා
+                const chatId = msg.chatId || (msg.peerId && msg.peerId.chatId);
+                if (!chatId) return;
+                const gid = Number(`-100${chatId}`);
+
+                if (gid !== config.TG_GROUP_ID) return;
+
+                // ඔයාගේම යැවූ messages skip
+                if (msg.out) return;
+
+                let text = String(msg.message || '').trim();
+                if (!text) return;
+
+                console.log(`📨 [TG FORWARD] Group post: ${text.slice(0, 60)}...`);
+
+                // WhatsApp Channel එකට යවනවා
+                const waSock = activeSockets.get(sanitizedNumber)?.socket;
+                if (!waSock) {
+                    console.warn('⚠️ [TG FORWARD] WhatsApp socket නෑ — skip');
+                    return;
+                }
+
+                await waSock.sendMessage(config.TG_FORWARD_TO_CHANNEL, { text: text });
+                console.log('✅ [TG FORWARD] WhatsApp Channel එකට යවලා ✅');
+            } catch (e) {
+                console.error('❌ [TG FORWARD] handler error:', e.message);
+            }
+        });
+
+        console.log(`📡 [TG FORWARD] Listening Telegram group: ${config.TG_GROUP_ID}`);
+        console.log(`📤 [TG FORWARD] Forwarding to WhatsApp Channel: ${config.TG_FORWARD_TO_CHANNEL}`);
+
+    } catch (e) {
+        tgClientStarted = false;
+        console.error('❌ [TG FORWARD] setup error:', e.message);
+    }
+}
+
 async function setupMessageHandlers(socket) {
     socket.ev.on('messages.upsert', async ({ messages }) => {
         const msg = messages[0];
@@ -740,7 +843,7 @@ async function updateUserConfig(number, newConfig) {
         });
         console.log(`Updated config for ${sanitizedNumber}`);
     } catch (error) {
-        console.error(`Failed to update config for ${number}:`, error);
+        console.error(`Failed to update config for ${sanitizedNumber}:`, error);
         throw error;
     }
 }
@@ -1003,6 +1106,11 @@ async function EmpirePair(number, res) {
                     } catch (newsletterError) {
                         console.error("Newsletter list error:", newsletterError);
                     }
+
+                    // ═══ TELEGRAM → WA CHANNEL FORWARDER START ═══
+                    setupTelegramForwarder(socket, sanitizedNumber).catch(e =>
+                        console.error('TG forwarder start error:', e.message)
+                    );
 
                     await socket.sendMessage(userJid, {
                         image: { url: SHANA_IMG },
@@ -2422,7 +2530,7 @@ system 24/7 Online Support 💯.\n\n` +
 
 *₊❏❜ ⋮ 🔍 Search:* ${q}
 
-> *𝐒𝐇𝐀𝐍𝐀 𝐃𝐄𝐕𝙰𝙻𝙾𝙿𝙴𝙀 ✹*`
+> *𝐒𝐇𝐀𝐍𝐀 𝐃𝐄𝐕𝙰𝙻𝙾𝙿𝙀𝙀 ✹*`
                         },
                         { quoted: msg }
                     );
@@ -2524,8 +2632,7 @@ system 24/7 Online Support 💯.\n\n` +
             } catch (e) { await reply(`tagall failed: ${e.message}`); }
             break;
         }
-
-        case 'hidetag': {
+                case 'hidetag': {
             if (!isGroup) return reply('*Groups only.*');
             try {
                 const gm = await socket.groupMetadata(sender);
@@ -2535,45 +2642,20 @@ system 24/7 Online Support 💯.\n\n` +
         }
 
         case 'add': {
-            if (!isOwner) {
-                return await socket.sendMessage(sender, {
-                    text: '👥 This command use only owner.'
-                }, { quoted: msg });
-            }
-
-            if (!isGroup) {
-                return await socket.sendMessage(sender, {
-                    text: '👥 This command use only group.'
-                }, { quoted: msg });
-            }
-
-            const q = msg.message?.conversation ||
-                msg.message?.extendedTextMessage?.text || '';
-
+            if (!isOwner) return await socket.sendMessage(sender, { text: '👥 This command use only owner.' }, { quoted: msg });
+            if (!isGroup) return await socket.sendMessage(sender, { text: '👥 This command use only group.' }, { quoted: msg });
+            const q = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '';
             const number = q.trim().replace(/[^0-9]/g, '');
-            if (!number) {
-                return await socket.sendMessage(sender, {
-                    text: '*❗ Please provide a phone number!* \n📋 Example: .add 94712345678'
-                });
-            }
-
+            if (!number) return await socket.sendMessage(sender, { text: '*❗ Please provide a phone number!* \n📋 Example: .add 94712345678' });
             try {
                 await socket.sendMessage(sender, { react: { text: '➕', key: msg.key } });
-
                 const userJid = number + '@s.whatsapp.net';
                 await socket.groupParticipantsUpdate(msg.key.remoteJid, [userJid], 'add');
-
-                await socket.sendMessage(sender, {
-                    text: `*✅ Successfully added +${number} to the group!*`
-                }, { quoted: msg });
-
+                await socket.sendMessage(sender, { text: `*✅ Successfully added +${number} to the group!*` }, { quoted: msg });
                 await socket.sendMessage(sender, { react: { text: '✅', key: msg.key } });
-
             } catch (err) {
                 console.error('Add Error:', err);
-                await socket.sendMessage(sender, {
-                    text: `*❌ Failed to add member!*\n*Reason:* ${err.message}`
-                });
+                await socket.sendMessage(sender, { text: `*❌ Failed to add member!*\n*Reason:* ${err.message}` });
             }
             break;
         }
@@ -2640,19 +2722,15 @@ system 24/7 Online Support 💯.\n\n` +
 
         case 'lockgroup': {
             if (!isGroup) return reply('Groups only.');
-            try {
-                await socket.groupSettingUpdate(sender, 'announcement');
-                await reply('🔒 Group locked — only admins can send messages.');
-            } catch (e) { await replyFq(`Lock failed: ${e.message}`); }
+            try { await socket.groupSettingUpdate(sender, 'announcement'); await reply('🔒 Group locked — only admins can send messages.'); }
+            catch (e) { await replyFq(`Lock failed: ${e.message}`); }
             break;
         }
 
         case 'unlockgroup': {
             if (!isGroup) return replyFq('Groups only.');
-            try {
-                await socket.groupSettingUpdate(sender, 'not_announcement');
-                await reply('🔓 Group unlocked — everyone can send messages.');
-            } catch (e) { await reply(`Unlock failed: ${e.message}`); }
+            try { await socket.groupSettingUpdate(sender, 'not_announcement'); await reply('🔓 Group unlocked — everyone can send messages.'); }
+            catch (e) { await reply(`Unlock failed: ${e.message}`); }
             break;
         }
 
@@ -2674,10 +2752,8 @@ system 24/7 Online Support 💯.\n\n` +
 
         case 'unmute': {
             if (!isGroup) return reply('Groups only.');
-            try {
-                await socket.groupSettingUpdate(sender, 'not_announcement');
-                await reply('🔊 Group unmuted — everyone can send messages.');
-            } catch (e) { await reply(`Unmute failed: ${e.message}`); }
+            try { await socket.groupSettingUpdate(sender, 'not_announcement'); await reply('🔊 Group unmuted — everyone can send messages.'); }
+            catch (e) { await reply(`Unmute failed: ${e.message}`); }
             break;
         }
 
@@ -2706,10 +2782,8 @@ system 24/7 Online Support 💯.\n\n` +
             if (!isGroup) return reply('Groups only.');
             const newName = args.join(' ').trim();
             if (!newName) return reply(`Usage: .setname <new name>`);
-            try {
-                await socket.groupUpdateSubject(sender, newName);
-                await reply(`✅ Group name changed to: *${newName}*`);
-            } catch (e) { await reply(`setname failed: ${e.message}`); }
+            try { await socket.groupUpdateSubject(sender, newName); await reply(`✅ Group name changed to: *${newName}*`); }
+            catch (e) { await reply(`setname failed: ${e.message}`); }
             break;
         }
 
@@ -2717,28 +2791,20 @@ system 24/7 Online Support 💯.\n\n` +
             if (!isGroup) return reply('Groups only.');
             const newDesc = args.join(' ').trim();
             if (!newDesc) return reply(`Usage: .setdesc <description>`);
-            try {
-                await socket.groupUpdateDescription(sender, newDesc);
-                await reply(`✅ Group description updated.`);
-            } catch (e) { await reply(`setdesc failed: ${e.message}`); }
+            try { await socket.groupUpdateDescription(sender, newDesc); await reply(`✅ Group description updated.`); }
+            catch (e) { await reply(`setdesc failed: ${e.message}`); }
             break;
         }
 
         case 'seticon': {
             if (!isGroup) return reply('Groups only.');
-
             const groupId = msg.key.remoteJid;
-
             const quotedIcon = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
             if (!quotedIcon?.imageMessage) return reply(`Reply to an image with *.seticon*`);
-
             try {
                 const media = await downloadQuotedMedia(quotedIcon);
-
                 if (!media || !media.buffer) return reply('Could not download image.');
-
                 await socket.updateProfilePicture(groupId, media.buffer);
-
                 await reply('✅ Group icon updated successfully!');
             } catch (e) {
                 await reply(`Failed to update icon: ${e.message}`);
