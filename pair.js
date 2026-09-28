@@ -579,111 +579,116 @@ async function ytdlpDownload(url, mode, outPath) {
 // ═══ ඔයාගේම TG account එකෙන් group messages කියවලා ═══
 // ═══ WhatsApp Channel එකට auto forward කරනවා (admin ඕන නෑ) ═══
 // ═══════════════════════════════════════════════════════════════
-const TG_SESSION_PATH = path.join(SESSION_BASE_PATH, 'tg_session.txt');
+const TG_SESSION_FILE = path.join(__dirname, 'session', 'tg_session.txt');
 let tgClientStarted = false;
+
+function loadTgSessionString() {
+    if (process.env.TG_SESSION && String(process.env.TG_SESSION).trim().length > 10) {
+        console.log('✅ [TG FORWARD] Saved Telegram session loaded (env TG_SESSION)');
+        return String(process.env.TG_SESSION).trim();
+    }
+    try {
+        if (fs.existsSync(TG_SESSION_FILE)) {
+            const s = fs.readFileSync(TG_SESSION_FILE, 'utf8').trim();
+            if (s.length > 10) {
+                console.log('✅ [TG FORWARD] Saved Telegram session loaded (session/tg_session.txt)');
+                return s;
+            }
+        }
+    } catch (e) {
+        console.warn('⚠️ [TG FORWARD] session file read error:', e.message);
+    }
+    return '';
+}
 
 async function setupTelegramForwarder(socket, sanitizedNumber) {
     if (tgClientStarted) {
         console.log('📌 [TG FORWARD] Telegram client already running — skipping');
         return;
     }
+
+    if (!config.TG_API_ID || !config.TG_API_HASH) {
+        console.warn('⚠️ [TG FORWARD] TG_API_ID / TG_API_HASH නෑ — forwarder off');
+        return;
+    }
+
     tgClientStarted = true;
 
     try {
-        let savedSession = '';
-        try {
-            if (fs.existsSync(TG_SESSION_PATH)) {
-                savedSession = fs.readFileSync(TG_SESSION_PATH, 'utf8').trim();
-                console.log('✅ [TG FORWARD] Saved Telegram session loaded');
-            }
-        } catch (_) {}
+        const sessionStr = loadTgSessionString();
 
         const tgClient = new TelegramClient(
-            new StringSession(savedSession),
-            config.TG_API_ID,
-            config.TG_API_HASH,
+            new StringSession(sessionStr),
+            Number(config.TG_API_ID),
+            String(config.TG_API_HASH),
             { connectionRetries: 5 }
         );
 
-        // පළවෙනි වතාවට විතරයි phone + login code අහන්නේ (console එකේ)
-        await tgClient.start({
-            phoneNumber: async () => input.text('📱 [TG FORWARD] Telegram phone number (+947xxxxxxxx): '),
-            password: async () => input.password('🔒 [TG FORWARD] 2FA password (තියෙනවා නම්): '),
-            phoneCode: async () => input.text('💬 [TG FORWARD] Telegram එකෙන් ආපු code එක: '),
-            onError: (err) => console.error('❌ [TG FORWARD] login error:', err.message)
-        });
+        // ★ start() call කරන්නෙම නෑ → phone/code/password prompt අහන්නෙ නෑ
+        await tgClient.connect();
 
-        console.log('✅ [TG FORWARD] Telegram logged in:', tgClient.session.userId || 'user');
-
-        // session එක file එකේ save කරනවා — ආයේ login වෙන්න ඕන නෑ
-        try {
-            fs.writeFileSync(TG_SESSION_PATH, tgClient.session.save());
-        } catch (e) {
-            console.warn('⚠️ [TG FORWARD] session save error:', e.message);
+        const authorized = await tgClient.isUserAuthorized();
+        if (!authorized) {
+            console.error('❌ [TG FORWARD] Telegram session eka wada karanne na! ' +
+                'session/tg_session.txt ekata valid session string ekak danna (or TG_SESSION env var). ' +
+                'String eka hadaganna: node gen_tg_session.js');
+            try { await tgClient.disconnect(); } catch (_) {}
+            tgClientStarted = false;
+            return;
         }
 
-        // ═══ Group messages listen කරනවා ═══
-        tgClient.addEventHandler(async (update) => {
+        const me = await tgClient.getMe().catch(() => ({}));
+        console.log(`✅ [TG FORWARD] Telegram logged in: ${me.username || me.id || 'user'}`);
+
+        const TG_TARGET = String(config.TG_GROUP_ID);
+        const WA_CHANNEL = config.TG_FORWARD_TO_CHANNEL;
+
+        tgClient.addEventHandler(async (event) => {
             try {
-                const msg = update.message;
-                if (!msg || !msg.message) return;
+                const msg = event.message;
+                if (!msg) return;
 
-                // ═══ FIX: GramJS එකෙන් එන chatId එක දැනටමත් -100 marked ID එක (supergroup).
-                // ═══ කලින් ආයෙත් "-100" එකතු කරපු නිසා NaN වෙලා හැම msg එකම filter වුනා.
-                // ═══ දැන් indan forms දෙකටම match වෙනවා (marked / bare).
-                const rawChatId = (msg.chatId !== undefined && msg.chatId !== null)
-                    ? msg.chatId
-                    : (msg.peerId
-                        ? (msg.peerId.chatId !== undefined ? msg.peerId.chatId : msg.peerId.channelId)
-                        : undefined);
+                // ★ GramJS chatId eka danatama marked id ekak (-100...) — aye -100 prepend karanne na
+                const cid = String(msg.chatId);
+                console.log(`🔎 [TG FORWARD] chatId=${cid} | match=${cid === TG_TARGET}`);
+                if (cid !== TG_TARGET) return;
 
-                if (rawChatId === undefined || rawChatId === null) return;
-
-                const target = Number(config.TG_GROUP_ID);
-                const bare = String(rawChatId).replace(/^-100/, '').replace(/^-/, '');
-
-                const candidates = [
-                    Number(rawChatId),          // -1003736315646 (placed dagaththa)
-                    Number(`-100${bare}`),      // -100 + bare
-                    Number(bare)                // 3736315646 (positive)
-                ];
-
-                console.log(`🔎 [TG FORWARD] chatId=${rawChatId} | target=${target} | match=${candidates.includes(target)}`);
-
-                if (!candidates.includes(target)) return;
-
-                // ඔයාගේම යැවූ messages skip
+                // oyage may yawana message skip
                 if (msg.out) return;
 
-                let text = String(msg.message || '').trim();
-                if (!text) return;
+                const text = String(msg.message || '').trim();
+                if (!text) return; // text/caption nathi media skip
 
-                console.log(`📨 [TG FORWARD] Group post: ${text.slice(0, 60)}...`);
-
-                // WhatsApp Channel එකට යවනවා
                 let waSock = activeSockets.get(sanitizedNumber)?.socket;
-
-                // fallback: ee session eke socket eka nattam live socket ekak hoyanawa
                 if (!waSock) {
                     for (const [, data] of activeSockets) {
                         if (data?.socket) { waSock = data.socket; break; }
                     }
                 }
-
                 if (!waSock) {
                     console.warn('⚠️ [TG FORWARD] WhatsApp socket නෑ — skip');
                     return;
                 }
 
-                await waSock.sendMessage(config.TG_FORWARD_TO_CHANNEL, { text: text });
-                console.log('✅ [TG FORWARD] WhatsApp Channel එකට යවලා ✅');
+                await waSock.sendMessage(WA_CHANNEL, { text });
+                console.log('✅ [TG FORWARD] forwarded →', text.slice(0, 50));
             } catch (e) {
                 console.error('❌ [TG FORWARD] handler error:', e.message);
             }
-        });
+        }, new NewMessage({ chats: [Number(TG_TARGET)] }));
 
-        console.log(`📡 [TG FORWARD] Listening Telegram group: ${config.TG_GROUP_ID}`);
-        console.log(`📤 [TG FORWARD] Forwarding to WhatsApp Channel: ${config.TG_FORWARD_TO_CHANNEL}`);
+        console.log(`📡 [TG FORWARD] Listening Telegram group: ${TG_TARGET}`);
+        console.log(`📤 [TG FORWARD] Forwarding to WhatsApp Channel: ${WA_CHANNEL}`);
+
+        // auto-reconnect (listener eka persist wenawa)
+        setInterval(async () => {
+            try {
+                if (!tgClient.connected) {
+                    await tgClient.connect();
+                    console.log('🔄 [TG FORWARD] reconnected');
+                }
+            } catch (_) {}
+        }, 60 * 1000);
 
     } catch (e) {
         tgClientStarted = false;
