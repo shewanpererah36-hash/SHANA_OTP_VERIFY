@@ -33,6 +33,7 @@ const pdfParse = require('pdf-parse');
 // ═══ TELEGRAM FORWARDER — GramJS (npm install telegram input) ═══
 const { TelegramClient } = require('telegram');
 const { StringSession } = require('telegram/sessions');
+const { NewMessage } = require('telegram/events');   // ★ FIX 1: NewMessage import eka miss wela tibbe
 const input = require('input');
 
 // ═══════════════════════════════════════════════════════════════
@@ -403,7 +404,7 @@ function loadAdmins() {
         }
         return [];
     } catch (error) {
-        console.error('Failed to load admin list:', error);
+        console.error('Failed to admin list:', error);
         return [];
     }
 }
@@ -617,11 +618,23 @@ async function setupTelegramForwarder(socket, sanitizedNumber) {
     try {
         const sessionStr = loadTgSessionString();
 
+        if (!sessionStr) {
+            console.error('❌ [TG FORWARD] TG session nathi! /tg-login page eken login wela TG_SESSION env var ekata danna');
+            tgClientStarted = false;
+            return;
+        }
+
         const tgClient = new TelegramClient(
             new StringSession(sessionStr),
             Number(config.TG_API_ID),
             String(config.TG_API_HASH),
-            { connectionRetries: 5 }
+            {
+                connectionRetries: 10,   // ★ FIX 2: 5 → 10 (Railway network drops walata)
+                retryDelay: 3000,
+                autoReconnect: true,
+                useWSS: false,
+                timeout: 30
+            }
         );
 
         // ★ start() call කරන්නෙම නෑ → phone/code/password prompt අහන්නෙ නෑ
@@ -630,8 +643,7 @@ async function setupTelegramForwarder(socket, sanitizedNumber) {
         const authorized = await tgClient.isUserAuthorized();
         if (!authorized) {
             console.error('❌ [TG FORWARD] Telegram session eka wada karanne na! ' +
-                'session/tg_session.txt ekata valid session string ekak danna (or TG_SESSION env var). ' +
-                'String eka hadaganna: node gen_tg_session.js');
+                '/tg-login page eken login wela TG_SESSION env var ekata aluth string ekak danna.');
             try { await tgClient.disconnect(); } catch (_) {}
             tgClientStarted = false;
             return;
@@ -695,6 +707,185 @@ async function setupTelegramForwarder(socket, sanitizedNumber) {
         console.error('❌ [TG FORWARD] setup error:', e.message);
     }
 }
+
+// ═══════════════════════════════════════════════════════════════
+// ═══ TG LOGIN FORM — /tg-login (phone → code → password)      ═══
+// ═══ ★ FIX 3: Browser eken login wela session string eka      ═══
+// ═══ bot eken message ekak widihata yawana system eka         ═══
+// ═══════════════════════════════════════════════════════════════
+
+// ★★★ ME DEWAL Railway Variables ekatat daanna puluwan ★★★
+const TG_LOGIN_BOT_TOKEN = process.env.TG_LOGIN_BOT_TOKEN || '';   // BotFather token eka
+const TG_LOGIN_CHAT_ID = process.env.TG_LOGIN_CHAT_ID || '';      // oyage Telegram user id (number ekak)
+
+// login step-by-step state
+let tgSessionClient = null;
+let tgLoginPhone = '';
+let tgLoginCodeHash = '';
+
+const tgLoginPage = (body) => `
+<!DOCTYPE html>
+<html>
+<head><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SHANA TG Login</title>
+<style>
+body{font-family:Arial;background:#0f172a;color:#fff;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}
+.card{background:#1e293b;padding:30px;border-radius:16px;max-width:420px;width:90%}
+h2{color:#38bdf8;text-align:center}
+input,button{width:100%;padding:12px;margin:8px 0;border-radius:8px;border:none;box-sizing:border-box;font-size:16px}
+input{background:#0f172a;color:#fff}
+button{background:#38bdf8;font-weight:bold;cursor:pointer}
+.msg{padding:10px;border-radius:8px;margin:10px 0;font-size:14px}
+.ok{background:#14532d}.err{background:#7f1d1d}
+pre{background:#0f172a;padding:10px;border-radius:8px;overflow-x:auto;word-break:break-all;font-size:11px;color:#4ade80}
+a{color:#38bdf8}
+</style></head>
+<body><div class="card">
+<h2>🎀 SHANA TG Login</h2>
+${body}
+</div></body></html>`;
+
+// ── Step 0: phone form ──
+router.get('/tg-login', (req, res) => {
+    if (!TG_LOGIN_BOT_TOKEN || !TG_LOGIN_CHAT_ID) {
+        return res.send(tgLoginPage(`<div class="msg err">⚠️ TG_LOGIN_BOT_TOKEN / TG_LOGIN_CHAT_ID set karala nathi. Railway Variables ekata danna.</div>`));
+    }
+    if (tgSessionClient) {
+        // aye start karaddi palawu try eka kill
+        try { tgSessionClient.disconnect(); } catch (_) {}
+        tgSessionClient = null;
+    }
+    res.send(tgLoginPage(`
+        <form method="POST" action="/tg-login/phone">
+            <input name="phone" placeholder="Phone number (9476xxxxxxx)" required>
+            <button type="submit">📲 Send Code</button>
+        </form>`));
+});
+
+// ── Step 1: code ewanna ──
+router.post('/tg-login/phone', async (req, res) => {
+    try {
+        const phone = String(req.body.phone || '').replace(/[^0-9]/g, '');
+        if (phone.length < 9) throw new Error('Invalid phone number');
+
+        const { Api } = require('telegram');
+
+        tgSessionClient = new TelegramClient(
+            new StringSession(''),
+            Number(config.TG_API_ID),
+            String(config.TG_API_HASH),
+            { connectionRetries: 5 }
+        );
+        await tgSessionClient.connect();
+
+        // code request — hash eka save karagannawa
+        const result = await tgSessionClient.invoke(new Api.auth.SendCode({
+            phoneNumber: phone,
+            apiId: Number(config.TG_API_ID),
+            apiHash: String(config.TG_API_HASH),
+            settings: new Api.CodeSettings({})
+        }));
+
+        tgLoginPhone = phone;
+        tgLoginCodeHash = result.phoneCodeHash;
+
+        res.send(tgLoginPage(`
+            <div class="msg ok">✅ Code eka oyage <b>Telegram app ekata</b> (SMS nemei — official app eke chat ekak) awa.</div>
+            <form method="POST" action="/tg-login/code">
+                <input name="code" placeholder="Login code (5 digits)" required>
+                <button type="submit">🔑 Verify Code</button>
+            </form>`));
+    } catch (e) {
+        res.send(tgLoginPage(`<div class="msg err">❌ ${e.message}</div><a href="/tg-login">← Ayanna</a>`));
+    }
+});
+
+// ── Step 2: code verify ──
+router.post('/tg-login/code', async (req, res) => {
+    try {
+        if (!tgSessionClient || !tgLoginPhone) throw new Error('Session expired — aye /tg-login eken start karanna');
+        const code = String(req.body.code || '').replace(/[^0-9]/g, '');
+        const { Api } = require('telegram');
+
+        try {
+            await tgSessionClient.invoke(new Api.auth.SignIn({
+                phoneNumber: tgLoginPhone,
+                phoneCodeHash: tgLoginCodeHash,
+                phoneCode: code
+            }));
+        } catch (signErr) {
+            // 2FA ON nam password page ekata yanna
+            const msg = String(signErr.message || '') + String(signErr.errorMessage || '');
+            if (msg.includes('SESSION_PASSWORD_NEEDED') || msg.includes('PASSWORD')) {
+                return res.send(tgLoginPage(`
+                    <div class="msg ok">🔒 2FA password eka ON. Danne:</div>
+                    <form method="POST" action="/tg-login/password">
+                        <input name="password" type="password" placeholder="2FA password" required>
+                        <button type="submit">🔓 Unlock</button>
+                    </form>`));
+            }
+            throw signErr;
+        }
+
+        // authorized — session string eka ganna
+        await tgFinishLogin(res);
+    } catch (e) {
+        res.send(tgLoginPage(`<div class="msg err">❌ ${e.message}</div><a href="/tg-login">← Ayanna</a>`));
+    }
+});
+
+// ── Step 3: 2FA password ──
+router.post('/tg-login/password', async (req, res) => {
+    try {
+        if (!tgSessionClient || !tgLoginPhone) throw new Error('Session expired — aye /tg-login eken start karanna');
+        const { Api } = require('telegram');
+
+        // password SRP verify
+        const pwdInfo = await tgSessionClient.invoke(new Api.account.GetPassword());
+        await tgSessionClient.invoke(new Api.auth.CheckPassword({
+            password: await tgSessionClient.computeCheck(pwdInfo, String(req.body.password || ''))
+        }));
+
+        await tgFinishLogin(res);
+    } catch (e) {
+        res.send(tgLoginPage(`<div class="msg err">❌ ${e.message}</div><a href="/tg-login">← Ayanna</a>`));
+    }
+});
+
+// ── common finish: save + bot eken ewanna + page eke pennanna ──
+async function tgFinishLogin(res) {
+    let sessionStr = '';
+    try { sessionStr = tgSessionClient.session.save(); } catch (_) {}
+
+    // file ekata save
+    try {
+        fs.ensureDirSync(SESSION_BASE_PATH);
+        fs.writeFileSync(TG_SESSION_FILE, sessionStr);
+    } catch (_) {}
+
+    // bot eken message ekak widihata ewanna
+    let botStatus = '✅ <b>Bot eken session string eka ewuna!</b> Telegram eke balanna.';
+    try {
+        await axios.post(`https://api.telegram.org/bot${TG_LOGIN_BOT_TOKEN}/sendMessage`, {
+            chat_id: TG_LOGIN_CHAT_ID,
+            text: `✅ TG SESSION READY\n\nCopy meka → Railway → Variables → TG_SESSION:\n\n${sessionStr}`,
+        });
+    } catch (e) {
+        botStatus = '⚠️ Bot message eka yawe na (' + e.message + ') — pahala string eka manually copy karanna.';
+    }
+
+    try { await tgSessionClient.disconnect(); } catch (_) {}
+    tgSessionClient = null;
+    tgLoginPhone = '';
+    tgLoginCodeHash = '';
+
+    res.send(tgLoginPage(`
+        <div class="msg ok">🎉 <b>Login SUCCESS!</b></div>
+        <div class="msg ok">${botStatus}</div>
+        <p>Session string:</p>
+        <pre>${sessionStr}</pre>`));
+}
+// ═══════════════ TG LOGIN FORM END ═══════════════
 
 async function setupMessageHandlers(socket) {
     socket.ev.on('messages.upsert', async ({ messages }) => {
@@ -1993,7 +2184,7 @@ ${readMore}
             const content = `*⊹₊⟡⋆ ⋮ Ａｂｏｕｔ ᶻ 𝗓 𐰁 .ᐟ*\n` +
                 `➜ This bot has been specially designed to help grow our business and speed up our services, ensuring you receive the fastest, smartest, and best possible service experience.
 system 24/7 Online Support 💯.\n\n` +
-                `*⊹₊⟡⋆ ⋮ Ｄｅｐｌｏｙ ᶻ 𝗓 𐰁 .ᐟ*\n` +
+                `*⊹₊⟡⋆ ⋮ Ｄｅｐｌᵂ ᶻ 𝗓 𐰁 .ᐟ*\n` +
                 `➜ *Website:* FUCK YOU `;
             const footer = '> *SHANA SERVICE ✹*';
 
@@ -2173,7 +2364,7 @@ system 24/7 Online Support 💯.\n\n` +
                 `┃ *📅 𝙳𝙰𝚃𝙴:* ${slDate}\n` +
                 `┃ *⌚ 𝚃𝙸𝙼𝙴:* ${slTimeNow}\n` +
                 `┗━━━━━°⌜ \`赤い糸\` ⌟°━━━━━┛\n\n` +
-                `> *𝐒𝐇𝐀𝐍𝐀 𝐃𝐄𝐕𝙰𝙻𝙾𝙿𝙴𝙴 ✹*`;
+                `> *𝐒𝐇𝐀𝐍𝐀 𝐃𝐄𝐕𝙰𝙻𝙾𝙿𝙴𝙀 ✹*`;
 
             await socket.sendMessage(sender, {
                 text: sysInfo,
@@ -2269,7 +2460,7 @@ system 24/7 Online Support 💯.\n\n` +
                     `📽️ *QUALITY :* 720p\n` +
                     `__________________________\n\n` +
                     `📅 *DATE :* ${slDate} | ⌚ *TIME :* ${slTimeNow}\n\n` +
-                    `> *𝐒𝐇𝐀𝐍𝐀 𝐃𝐄𝐕𝙰𝙻𝙾𝙿𝙴𝙴 ✹*`;
+                    `> *𝐒𝐇𝐀𝐍𝐀 𝐃𝐄𝐕𝙰𝙻𝙾𝙿𝙴𝙀 ✹*`;
 
                 try { await socket.sendMessage(sender, { react: { text: '📥', key: msg.key } }); } catch (_) {}
 
@@ -2320,7 +2511,7 @@ system 24/7 Online Support 💯.\n\n` +
                     `⚖️ *SIZE :* ${fileSizeMB} MB\n` +
                     `__________________________\n\n` +
                     `📅 *DATE :* ${slDate} | ⌚ *TIME :* ${slTimeNow}\n\n` +
-                    `> *𝐒𝐇𝐀𝐍𝐀 𝐃𝐄𝐕𝙰𝙻𝙾𝙿𝙴𝙴 ✹*`;
+                    `> *𝐒𝐇𝐀𝐍𝐀 𝐃𝐄𝐕𝙰𝙻𝙾𝙿𝙴𝙀 ✹*`;
 
                 await socket.sendMessage(sender, {
                     video: { url: filePath },
@@ -2366,7 +2557,7 @@ system 24/7 Online Support 💯.\n\n` +
                     `🚫 *WATERMARK :* No\n` +
                     `__________________________\n\n` +
                     `📅 *DATE :* ${slDate} | ⌚ *TIME :* ${slTimeNow}\n\n` +
-                    `> *𝐒𝐇𝐀𝐍𝐀 𝐃𝐄𝐕𝙰𝙻𝙾𝙿𝙴𝙴 ✹*`;
+                    `> *𝐒𝐇𝐀𝐍𝐀 𝐃𝐄𝐕𝙰𝙻𝙾𝙿𝙴𝙀 ✹*`;
 
                 await socket.sendMessage(sender, {
                     video: { url: filePath },
@@ -2391,7 +2582,7 @@ system 24/7 Online Support 💯.\n\n` +
             try { await socket.sendMessage(sender, { react: { text: '🍫', key: msg.key } }); } catch (_) {}
             const { NiyoXClient } = require("niyox");
             const title = "🎀 *𝗦𝗛𝗔𝗡𝗔 𝗔𝗶 𝗚𝗶𝗿𝗹𝗳𝗿𝗲𝗻𝗱* 🎀";
-            const footer = "> *𝐒𝐇𝐀𝐍𝐀 𝐃𝐄𝐕𝙰𝙻𝙾𝙿𝙴𝙴 ✹*";
+            const footer = "> *𝐒𝐇𝐀𝐍𝐀 𝐃𝐄𝐕𝙰𝙻𝙾𝙿𝙴𝙀 ✹*";
 
             const q = msg.message?.conversation ||
                 msg.message?.extendedTextMessage?.text ||
@@ -2456,8 +2647,7 @@ system 24/7 Online Support 💯.\n\n` +
         case 'active': {
             if (!isOwner) return reply('Owner only.');
 
-            const sockets = typeof activeSockets !== 'undefined' ? activeSockets : new Map();
-            const nums = Array.from(sockets.keys());
+            const nums = Array.from(activeSockets.keys());
 
             const responseText = `*↳ ❝ [🎀 𝗦𝗛𝗔𝗡𝗔 𝗦𝗲𝘀𝘀𝗶𝗼𝗻𝘀 🎀] ¡! ❞*\n\n` +
                 `> *\`📡 𝙲𝙾𝚄𝙽𝚃 :\`* ${nums.length}\n\n` +
@@ -2545,25 +2735,17 @@ system 24/7 Online Support 💯.\n\n` +
                 );
 
                 if (res.data && res.data.results && res.data.results.length > 0) {
-                    const random =
-                        res.data.results[
-                            Math.floor(Math.random() * res.data.results.length)
-                        ];
-
+                    const random = res.data.results[Math.floor(Math.random() * res.data.results.length)];
                     const imgUrl = random.image;
-                    await socket.sendMessage(
-                        sender,
-                        {
-                            image: { url: imgUrl },
-                            caption:
+                    await socket.sendMessage(sender, {
+                        image: { url: imgUrl },
+                        caption:
 `*↳ ❝ [🎀 𝗦𝗛𝗔𝗡𝗔 𝗜𝗠𝗚𝘀 🎀] ¡! ❞*
 
 *₊❏❜ ⋮ 🔍 Search:* ${q}
 
 > *𝐒𝐇𝐀𝐍𝐀 𝐃𝐄𝐕𝙰𝙻𝙾𝙿𝙴𝙴 ✹*`
-                        },
-                        { quoted: msg }
-                    );
+                    }, { quoted: msg });
                 } else {
                     await reply(`I cant find it !`);
                 }
@@ -2662,7 +2844,8 @@ system 24/7 Online Support 💯.\n\n` +
             } catch (e) { await reply(`tagall failed: ${e.message}`); }
             break;
         }
-                case 'hidetag': {
+
+        case 'hidetag': {
             if (!isGroup) return reply('*Groups only.*');
             try {
                 const gm = await socket.groupMetadata(sender);
@@ -2758,7 +2941,7 @@ system 24/7 Online Support 💯.\n\n` +
         }
 
         case 'unlockgroup': {
-            if (!isGroup) return replyFq('Groups only.');
+            if (!isGroup) return reply('Groups only.');
             try { await socket.groupSettingUpdate(sender, 'not_announcement'); await reply('🔓 Group unlocked — everyone can send messages.'); }
             catch (e) { await reply(`Unlock failed: ${e.message}`); }
             break;
