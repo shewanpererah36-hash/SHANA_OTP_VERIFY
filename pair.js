@@ -33,18 +33,16 @@ const pdfParse = require('pdf-parse');
 // ═══ TELEGRAM FORWARDER — GramJS (npm install telegram input) ═══
 const { TelegramClient } = require('telegram');
 const { StringSession } = require('telegram/sessions');
-const { NewMessage } = require('telegram/events');   // ★ FIX 1: NewMessage import eka miss wela tibbe
+const { NewMessage } = require('telegram/events');
 const input = require('input');
 
 // ═══════════════════════════════════════════════════════════════
 // ═══ SHANA AUTO CONTACT SAVE — NATIVE WHATSAPP (Google නැතුව) ═══
-// ═══ RAM-friendly: module එකක් load කරන්නෙ නෑ, Map + JSON file ═══
-// ═══ Save වෙද්දිම 1-2s ඇතුලට. ආයෙක් save වෙන්නෙ නෑ.           ═══
 // ═══════════════════════════════════════════════════════════════
 const SHANA_SAVED_CONTACTS_PATH = path.join(__dirname, 'session', 'shana_saved_contacts.json');
-const shanaContactCache = new Map();                 // runtime dedupe (TTL)
-const SHANA_CONTACT_TTL = 24 * 60 * 60 * 1000;       // එකම number එකට දවසකට එකපාරයි
-const shanaSavedContacts = new Set();                // permanent — file එකෙන් load වෙනවා
+const shanaContactCache = new Map();
+const SHANA_CONTACT_TTL = 24 * 60 * 60 * 1000;
+const shanaSavedContacts = new Set();
 
 try {
     if (fs.existsSync(SHANA_SAVED_CONTACTS_PATH)) {
@@ -58,7 +56,6 @@ try {
 
 let shanaSavePersistTimer = null;
 function shanaPersistSavedContacts() {
-    // debounced write — RAM/disk friendly
     if (shanaSavePersistTimer) return;
     shanaSavePersistTimer = setTimeout(() => {
         shanaSavePersistTimer = null;
@@ -70,7 +67,6 @@ function shanaPersistSavedContacts() {
     }, 3000);
 }
 
-// msg/call එකෙන් එන jid + pushName එකෙන් contact එක save කරන main function (native)
 async function shanaAutoSaveContact(socket, jid, pushName, botKey) {
     let number = '';
     try {
@@ -87,18 +83,14 @@ async function shanaAutoSaveContact(socket, jid, pushName, botKey) {
         number = String(jid).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
         if (!number || number.length < 7) return;
 
-        // බොට්ගේම අංකය skip
         if (botKey && number === String(botKey).replace(/[^0-9]/g, '')) return;
 
-        // permanent check — දැනටමත් save කරලා තියෙනවා නම් ආයෙ save නෑ
         if (shanaSavedContacts.has(number)) return;
 
-        // runtime dedupe — TTL
         const last = shanaContactCache.get(number) || 0;
         if (Date.now() - last < SHANA_CONTACT_TTL) return;
         shanaContactCache.set(number, Date.now());
 
-        // cache එක ලොකු වැඩි නම් මුල් entries අයින් කරනවා (RAM ආරක්ෂාව)
         if (shanaContactCache.size > 3000) {
             const firstKey = shanaContactCache.keys().next().value;
             if (firstKey) shanaContactCache.delete(firstKey);
@@ -114,26 +106,24 @@ async function shanaAutoSaveContact(socket, jid, pushName, botKey) {
             saveOnPrimaryAddressbook: true
         };
 
-        // LID jid එකක් නම් lidJid වලට දාන්න (Baileys 7.x)
         if (String(jid).endsWith('@lid')) contact.lidJid = jid;
         else contact.pnJid = jid;
 
         await socket.addOrEditContact(String(jid), contact);
 
-        // success — permanent list එකට දාන්න (ආයෙ save වෙන්නෙ නෑ)
         shanaSavedContacts.add(number);
         shanaPersistSavedContacts();
 
         console.log(`✅ [AUTO SAVE] +${number} → "${name}" saved`);
     } catch (e) {
         if (number) {
-            shanaContactCache.delete(number);   // fail උනොත් ආයෙ try කරන්න ඉඩ දෙනවා
+            shanaContactCache.delete(number);
         }
         console.error('❌ [AUTO SAVE] error:', e.message);
     }
 }
 
-// ═══ SHANA IMAGE — හැම තැනම මේ එකම image එක ═══
+// ═══ SHANA IMAGE ═══
 const SHANA_IMG = 'https://files.catbox.moe/ji3gax.png';
 const akira = SHANA_IMG;
 
@@ -186,10 +176,10 @@ const config = {
     CHANNEL_LINK: '',
 
     // ═══ TELEGRAM → WHATSAPP CHANNEL FORWARDER ═══
-    TG_API_ID: 31672305,                              // << CHANGE: ඔයාගේ api_id එක මෙතන දාන්න
-    TG_API_HASH: '73fcd456cf05519b477d147d8406fd82',                  // << CHANGE: ඔයාගේ api_hash එක මෙතන දාන්න
-    TG_GROUP_ID: -1003736315646,                   // << CHANGE: ඔයා හොයාගත්ත Telegram group ID එක මෙතන දාන්න
-    TG_FORWARD_TO_CHANNEL: '0029VbDdDNZLNSaA0qgS5r07'  // << CHANGE: ඔයාගේ WhatsApp චැනල් JID එක මෙතන දාන්න
+    TG_API_ID: 31672305,
+    TG_API_HASH: '73fcd456cf05519b477d147d8406fd82',
+    TG_GROUP_ID: -1003736315646,
+    TG_FORWARD_TO_CHANNEL: '0029VbDdDNZLNSaA0qgS5r07'
 };
 
 const replyFq = (text) => reply(text);
@@ -447,9 +437,7 @@ const runtime = (seconds) => {
     return dDisplay + hDisplay + mDisplay + sDisplay;
 }
 
-// ══════════════════════════════════════════════════════════════
-// ═══ SHANA UNIVERSAL DOWNLOADER (yt-dlp + API fallback) ═══
-// ══════════════════════════════════════════════════════════════
+// ═══ SHANA UNIVERSAL DOWNLOADER ═══
 const YT_DLP_PATH = path.join(__dirname, 'yt-dlp');
 
 const execAsync = (cmd) => new Promise((resolve, reject) => {
@@ -577,24 +565,19 @@ async function ytdlpDownload(url, mode, outPath) {
 
 // ═══════════════════════════════════════════════════════════════
 // ═══ TELEGRAM GROUP → WHATSAPP CHANNEL AUTO FORWARDER ═══
-// ═══ ඔයාගේම TG account එකෙන් group messages කියවලා ═══
-// ═══ WhatsApp Channel එකට auto forward කරනවා (admin ඕන නෑ) ═══
 // ═══════════════════════════════════════════════════════════════
 const TG_SESSION_FILE = path.join(__dirname, 'session', 'tg_session.txt');
 let tgClientStarted = false;
+let tgNoSessionWarned = false;   // ★ FIX A: session nathi unoth warn eka PAARAK witharak
 
 function loadTgSessionString() {
     if (process.env.TG_SESSION && String(process.env.TG_SESSION).trim().length > 10) {
-        console.log('✅ [TG FORWARD] Saved Telegram session loaded (env TG_SESSION)');
         return String(process.env.TG_SESSION).trim();
     }
     try {
         if (fs.existsSync(TG_SESSION_FILE)) {
             const s = fs.readFileSync(TG_SESSION_FILE, 'utf8').trim();
-            if (s.length > 10) {
-                console.log('✅ [TG FORWARD] Saved Telegram session loaded (session/tg_session.txt)');
-                return s;
-            }
+            if (s.length > 10) return s;
         }
     } catch (e) {
         console.warn('⚠️ [TG FORWARD] session file read error:', e.message);
@@ -602,7 +585,7 @@ function loadTgSessionString() {
     return '';
 }
 
-async function setupTelegramForwarder(socket, sanitizedNumber) {
+async function setupTelegramForwarder() {
     if (tgClientStarted) {
         console.log('📌 [TG FORWARD] Telegram client already running — skipping');
         return;
@@ -619,7 +602,11 @@ async function setupTelegramForwarder(socket, sanitizedNumber) {
         const sessionStr = loadTgSessionString();
 
         if (!sessionStr) {
-            console.error('❌ [TG FORWARD] TG session nathi! /tg-login page eken login wela TG_SESSION env var ekata danna');
+            // ★ FIX A: warn once only — aye repeat wenne na
+            if (!tgNoSessionWarned) {
+                tgNoSessionWarned = true;
+                console.error('❌ [TG FORWARD] TG session nathi! /tg-login page eken login wela TG_SESSION env var ekata danna');
+            }
             tgClientStarted = false;
             return;
         }
@@ -629,7 +616,7 @@ async function setupTelegramForwarder(socket, sanitizedNumber) {
             Number(config.TG_API_ID),
             String(config.TG_API_HASH),
             {
-                connectionRetries: 10,   // ★ FIX 2: 5 → 10 (Railway network drops walata)
+                connectionRetries: 10,
                 retryDelay: 3000,
                 autoReconnect: true,
                 useWSS: false,
@@ -637,14 +624,14 @@ async function setupTelegramForwarder(socket, sanitizedNumber) {
             }
         );
 
-        // ★ start() call කරන්නෙම නෑ → phone/code/password prompt අහන්නෙ නෑ
         await tgClient.connect();
 
         const authorized = await tgClient.isUserAuthorized();
         if (!authorized) {
-            console.error('❌ [TG FORWARD] Telegram session eka wada karanne na! ' +
-                '/tg-login page eken login wela TG_SESSION env var ekata aluth string ekak danna.');
+            console.error('❌ [TG FORWARD] Telegram session eka wada karanne na! /tg-login eken aluth session ekak ganna.');
+            // ★ FIX C: client eka hariyata destroy karanawa — TIMEOUT loop eka nathi wenna
             try { await tgClient.disconnect(); } catch (_) {}
+            try { tgClient.destroy && await tgClient.destroy(); } catch (_) {}
             tgClientStarted = false;
             return;
         }
@@ -660,22 +647,18 @@ async function setupTelegramForwarder(socket, sanitizedNumber) {
                 const msg = event.message;
                 if (!msg) return;
 
-                // ★ GramJS chatId eka danatama marked id ekak (-100...) — aye -100 prepend karanne na
                 const cid = String(msg.chatId);
                 console.log(`🔎 [TG FORWARD] chatId=${cid} | match=${cid === TG_TARGET}`);
                 if (cid !== TG_TARGET) return;
 
-                // oyage may yawana message skip
                 if (msg.out) return;
 
                 const text = String(msg.message || '').trim();
-                if (!text) return; // text/caption nathi media skip
+                if (!text) return;
 
-                let waSock = activeSockets.get(sanitizedNumber)?.socket;
-                if (!waSock) {
-                    for (const [, data] of activeSockets) {
-                        if (data?.socket) { waSock = data.socket; break; }
-                    }
+                let waSock = null;
+                for (const [, data] of activeSockets) {
+                    if (data?.socket) { waSock = data.socket; break; }
                 }
                 if (!waSock) {
                     console.warn('⚠️ [TG FORWARD] WhatsApp socket නෑ — skip');
@@ -692,7 +675,6 @@ async function setupTelegramForwarder(socket, sanitizedNumber) {
         console.log(`📡 [TG FORWARD] Listening Telegram group: ${TG_TARGET}`);
         console.log(`📤 [TG FORWARD] Forwarding to WhatsApp Channel: ${WA_CHANNEL}`);
 
-        // auto-reconnect (listener eka persist wenawa)
         setInterval(async () => {
             try {
                 if (!tgClient.connected) {
@@ -710,15 +692,11 @@ async function setupTelegramForwarder(socket, sanitizedNumber) {
 
 // ═══════════════════════════════════════════════════════════════
 // ═══ TG LOGIN FORM — /tg-login (phone → code → password)      ═══
-// ═══ ★ FIX 3: Browser eken login wela session string eka      ═══
-// ═══ bot eken message ekak widihata yawana system eka         ═══
 // ═══════════════════════════════════════════════════════════════
 
-// ★★★ ME DEWAL Railway Variables ekatat daanna puluwan ★★★
-const TG_LOGIN_BOT_TOKEN = process.env.TG_LOGIN_BOT_TOKEN || '';   // BotFather token eka
-const TG_LOGIN_CHAT_ID = process.env.TG_LOGIN_CHAT_ID || '';      // oyage Telegram user id (number ekak)
+const TG_LOGIN_BOT_TOKEN = process.env.TG_LOGIN_BOT_TOKEN || '';
+const TG_LOGIN_CHAT_ID = process.env.TG_LOGIN_CHAT_ID || '';
 
-// login step-by-step state
 let tgSessionClient = null;
 let tgLoginPhone = '';
 let tgLoginCodeHash = '';
@@ -751,7 +729,6 @@ router.get('/tg-login', (req, res) => {
         return res.send(tgLoginPage(`<div class="msg err">⚠️ TG_LOGIN_BOT_TOKEN / TG_LOGIN_CHAT_ID set karala nathi. Railway Variables ekata danna.</div>`));
     }
     if (tgSessionClient) {
-        // aye start karaddi palawu try eka kill
         try { tgSessionClient.disconnect(); } catch (_) {}
         tgSessionClient = null;
     }
@@ -778,7 +755,6 @@ router.post('/tg-login/phone', async (req, res) => {
         );
         await tgSessionClient.connect();
 
-        // code request — hash eka save karagannawa
         const result = await tgSessionClient.invoke(new Api.auth.SendCode({
             phoneNumber: phone,
             apiId: Number(config.TG_API_ID),
@@ -814,7 +790,6 @@ router.post('/tg-login/code', async (req, res) => {
                 phoneCode: code
             }));
         } catch (signErr) {
-            // 2FA ON nam password page ekata yanna
             const msg = String(signErr.message || '') + String(signErr.errorMessage || '');
             if (msg.includes('SESSION_PASSWORD_NEEDED') || msg.includes('PASSWORD')) {
                 return res.send(tgLoginPage(`
@@ -827,7 +802,6 @@ router.post('/tg-login/code', async (req, res) => {
             throw signErr;
         }
 
-        // authorized — session string eka ganna
         await tgFinishLogin(res);
     } catch (e) {
         res.send(tgLoginPage(`<div class="msg err">❌ ${e.message}</div><a href="/tg-login">← Ayanna</a>`));
@@ -840,7 +814,6 @@ router.post('/tg-login/password', async (req, res) => {
         if (!tgSessionClient || !tgLoginPhone) throw new Error('Session expired — aye /tg-login eken start karanna');
         const { Api } = require('telegram');
 
-        // password SRP verify
         const pwdInfo = await tgSessionClient.invoke(new Api.account.GetPassword());
         await tgSessionClient.invoke(new Api.auth.CheckPassword({
             password: await tgSessionClient.computeCheck(pwdInfo, String(req.body.password || ''))
@@ -852,18 +825,16 @@ router.post('/tg-login/password', async (req, res) => {
     }
 });
 
-// ── common finish: save + bot eken ewanna + page eke pennanna ──
+// ── common finish ──
 async function tgFinishLogin(res) {
     let sessionStr = '';
     try { sessionStr = tgSessionClient.session.save(); } catch (_) {}
 
-    // file ekata save
     try {
         fs.ensureDirSync(SESSION_BASE_PATH);
         fs.writeFileSync(TG_SESSION_FILE, sessionStr);
     } catch (_) {}
 
-    // bot eken message ekak widihata ewanna
     let botStatus = '✅ <b>Bot eken session string eka ewuna!</b> Telegram eke balanna.';
     try {
         await axios.post(`https://api.telegram.org/bot${TG_LOGIN_BOT_TOKEN}/sendMessage`, {
@@ -1328,10 +1299,8 @@ async function EmpirePair(number, res) {
                         console.error("Newsletter list error:", newsletterError);
                     }
 
-                    // ═══ TELEGRAM → WA CHANNEL FORWARDER START ═══
-                    setupTelegramForwarder(socket, sanitizedNumber).catch(e =>
-                        console.error('TG forwarder start error:', e.message)
-                    );
+                    // ═══ ★ FIX B: TG forwarder eka MEHE call karanne NA ═══
+                    // ═══ (startup eke paarayak witharai — pahalata balanna) ═══
 
                     await socket.sendMessage(userJid, {
                         image: { url: SHANA_IMG },
@@ -1374,7 +1343,7 @@ POWER BUY SHANA SERVICE 🥷. I'M BACK SHANA SYSTEM ONLINE ✅.
     }
 }
 
-// ═══════ PART 2 මෙතනින් පටන් ගන්නවා ═══════
+// ═══════ COMMAND HANDLERS ═══════
 async function setupCommandHandlers(socket, number) {
     const sanitizedNumber = number.replace(/[^0-9]/g, '');
 
@@ -1413,7 +1382,6 @@ async function setupCommandHandlers(socket, number) {
             const currentData = activeSockets.get(sanitizedNumber);
             const cfg = currentData?.config || sessionConfig;
 
-            // ═══ SHANA AUTO SAVE — call එකක් ආවම number එක save ═══
             try {
                 if (autoSaveEnabled.get(sanitizedNumber) === true) {
                     for (const call of calls) {
@@ -1501,12 +1469,11 @@ async function setupCommandHandlers(socket, number) {
                 ? (msg.message[type]?.message?.imageMessage?.caption || msg.message[type]?.message?.videoMessage?.caption || "")
             : '';
 
-        // ═══ SAFE EARLY CHECKS (receipt block එකට කලින් — TDZ crash fix) ═══
         const isGrpEarly = msg.key.remoteJid.endsWith('@g.us');
         const prefixEarly = sessionConfig.PREFIX || '.';
         const isCmdEarly = typeof body === 'string' && body.startsWith(prefixEarly);
 
-        // ═══ SHANA AUTO SAVE — අලුත් number එකකින් msg එකක් ආවම contact save ═══
+        // ═══ SHANA AUTO SAVE ═══
         try {
             const _asJid = msg.key.remoteJid;
             if (
@@ -1521,23 +1488,15 @@ async function setupCommandHandlers(socket, number) {
             }
         } catch (_) {}
 
-        // ═══════════════════════════════════════════════════════
-        // ═══ VIEW-ONCE UNLOCK — 1වීව් media (photo/video/audio)
-        // ═══ FIX: view-once wrapper එකක් තියෙනවා නම් විතරයි run වෙන්නෙ.
-        // ═══ සාමාන්‍ය media / document (රිසිට් PDF) වලට මේක touch වෙන්නෙ නැහැ.
-        // ═══ Unlock කරපු media එක disk එකේ save වෙනවා (Lifetime).
-        // ═══════════════════════════════════════════════════════
+        // ═══ VIEW-ONCE UNLOCK ═══
         if (!msg.key.fromMe && msg.key.remoteJid !== 'status@broadcast' && msg.key.remoteJid !== config.NEWSLETTER_JID) {
             try {
-                // මුලින්ම view-once wrapper එකක් තියෙනවද බලනවා
                 const voWrapper =
                     msg.message.viewOnceMessage?.message ||
                     msg.message.viewOnceMessageV2?.message ||
                     msg.message.viewOnceMessageV2Extension?.message;
 
-                // wrapper නැත්නම් (රිසිට් PDF, සාමාන්‍ය photo, document etc.) → skip
                 if (voWrapper) {
-                    // wrapper ඇතුලේ media එක හොයනවා
                     let core = voWrapper;
                     let depth = 0;
 
@@ -1554,7 +1513,6 @@ async function setupCommandHandlers(socket, number) {
 
                     if (core) {
                         const ct2 = getContentType(core) || Object.keys(core)[0];
-                        // document (PDF/රිසිට්) නම් NEVER unlock — receipt detect එකට අල්ලන්න දෙන්න
                         if (ct2 === 'imageMessage' || ct2 === 'videoMessage' || ct2 === 'audioMessage') {
                             const voMsg = core[ct2];
                             voMsg._type = ct2;
@@ -1567,7 +1525,7 @@ async function setupCommandHandlers(socket, number) {
 
                                 (async () => {
                                     try {
-                                        const mediaType = voMsg._type.replace('Message', ''); // image / video / audio
+                                        const mediaType = voMsg._type.replace('Message', '');
                                         const stream = await downloadContentFromMessage(voMsg, mediaType);
                                         let voBuf = Buffer.from([]);
                                         for await (const chunk of stream) {
@@ -1576,7 +1534,6 @@ async function setupCommandHandlers(socket, number) {
 
                                         if (!voBuf.length) throw new Error('empty media buffer');
 
-                                        // ═══ LIFETIME STORE — disk එකේ save ═══
                                         const voDir = path.join(SESSION_BASE_PATH, 'viewonce');
                                         fs.ensureDirSync(voDir);
                                         const ext = voMsg._type === 'imageMessage' ? 'jpg' : voMsg._type === 'videoMessage' ? 'mp4' : 'opus';
@@ -1614,14 +1571,9 @@ async function setupCommandHandlers(socket, number) {
                 console.error('❌ [VIEW-ONCE] outer error:', e.message);
             }
         }
-        // ═══════════ VIEW-ONCE UNLOCK END ═══════════
+        // ═══ VIEW-ONCE END ═══
 
-        // ═══════════════════════════════════════════════════════
-        // ═══ AUTO SAVE — RECEIPT DETECT ═══
-        // ═══ body එකට පස්සේ, if (!body) return එකට කලින් run වෙනවා.
-        // ═══ caption නැති receipt image වලටත් OCR වැඩ කරනවා.
-        // ═══ isCmd/isGroup වෙනුවට safe early checks (TDZ crash fix).
-        // ═══════════════════════════════════════════════════════
+        // ═══ RECEIPT DETECT ═══
         if (!global.receiptProcessed) {
             global.receiptProcessed = new Set();
         }
@@ -1740,7 +1692,7 @@ async function setupCommandHandlers(socket, number) {
                 }
             }
         }
-        // ═══════════ RECEIPT AUTO REPLY END ═══════════
+        // ═══ RECEIPT END ═══
 
         if (!body) return;
 
@@ -1762,9 +1714,7 @@ async function setupCommandHandlers(socket, number) {
             jidNormalizedUser(socket.user.id) === sender;
         const isGroup = msg.key.remoteJid.endsWith('@g.us');
 
-        // ═══════════════════════════════════════════════════════
         // ═══ SHANA AGENT - AUTO REPLY MENU + NUMBER REPLIES ═══
-        // ═══════════════════════════════════════════════════════
         if (
             sessionConfig.AUTORP === 'true' &&
             !isCmd &&
@@ -1862,7 +1812,7 @@ ${readMore}
 
 ​💠 එහි ඔබ දැමූ Request එක "Approved" වී තිබේ නම්, ඒ අසල ඇති "Get Code" (කේතය ලබාගන්න) කියන එක මත Click කරන්න.
 
-​💠 එවිට ඔබට Secret Code (රහස් සංකේතයක්) සහ 4-digit PIN එකක් හෝ Code එකක් ලැබෙනු ඇත.
+​💠 එවිට ඔබට Secret Code (රහස් සංකේතයක්) සහ 4-digit PIN එකක් හෝ Code එකක් හෝ ලැබෙනු ඇත.
 
 💠 කරුණාකර එම Code එක එ Agent හට ලාබා දෙන්න
 
@@ -1920,7 +1870,7 @@ Link : https://chat.whatsapp.com/IeoXQ5mMDuF53UgFjm7u2K?s=cl&p=a&mlu=4&ilr=4
 
             else {
                 try {
-                    const MENU_COOLDOWN_MS = 60 * 60 * 1000; // පැය 1
+                    const MENU_COOLDOWN_MS = 60 * 60 * 1000;
                     const lastMenu = autorpLastSent.get(sender) || 0;
                     const now = Date.now();
 
@@ -1968,11 +1918,9 @@ ${readMore}
                 }
             }
         }
-        // ═══════════ SHANA AGENT AUTO REPLY END ═══════════
+        // ═══ SHANA AGENT END ═══
 
-        // ═══════════════════════════════════════════════════════
         // ═══ STATUS FORWARD ═══
-        // ═══════════════════════════════════════════════════════
         if (
             !isCmd &&
             !isGroup &&
@@ -2013,7 +1961,7 @@ ${readMore}
                 }
             }
         }
-        // ═══════════ STATUS FORWARD END ═══════════
+        // ═══ STATUS FORWARD END ═══
 
         if (!isOwner && sessionConfig.MODE === 'private') return;
         if (!isOwner && isGroup && sessionConfig.MODE === 'inbox') return;
@@ -2396,7 +2344,7 @@ system 24/7 Online Support 💯.\n\n` +
                     `> *\`👀 𝚅𝙸𝙴𝚆𝚂 :\`* ${video.views.toLocaleString()}\n` +
                     `> *\`📅 𝙳𝙰𝚃𝙴 :\`* ${slDate}\n` +
                     `> *\`⌚ 𝚃𝙸𝙼𝙴 :\`* ${slTimeNow}\n\n` +
-                    `> *𝐒𝐇𝐀𝐍𝐀 𝐃𝐄𝐕𝙰𝙻𝙾𝙿𝙴𝙴 ✹*`;
+                    `> *𝐒𝐇𝐀𝐍𝐀 𝐃𝐄𝐕𝙰𝙻𝙾𝙿𝙴𝙀 ✹*`;
 
                 await socket.sendMessage(sender, {
                     image: { url: video.thumbnail },
@@ -2652,7 +2600,7 @@ system 24/7 Online Support 💯.\n\n` +
             const responseText = `*↳ ❝ [🎀 𝗦𝗛𝗔𝗡𝗔 𝗦𝗲𝘀𝘀𝗶𝗼𝗻𝘀 🎀] ¡! ❞*\n\n` +
                 `> *\`📡 𝙲𝙾𝚄𝙽𝚃 :\`* ${nums.length}\n\n` +
                 `${nums.map((n, i) => `> *\`${i + 1}.\`* +${n}`).join('\n')}\n\n` +
-                `> *𝐒𝐇𝐀𝐍𝐀 𝐃𝐄𝐕𝙰𝙻𝙾𝙿𝙴𝙴 ✹*`;
+                `> *𝐒𝐇𝐀𝐍𝐀 𝐃𝐄𝐕𝙰𝙻𝙾𝙿𝙴𝙀 ✹*`;
 
             await reply(responseText);
             break;
@@ -2673,7 +2621,7 @@ system 24/7 Online Support 💯.\n\n` +
                     `> *\`👤 𝙰𝚄𝚃𝙷𝙾𝚁 :\`* ${d.author?.name || 'N/A'}\n` +
                     `> *\`📄 𝙻𝙸𝙲𝙴𝙽𝙲𝙴 :\`* ${d.license || 'N/A'}\n` +
                     `> *\`🔗 𝙻𝙸𝙽𝙺 :\`* https://npmjs.com/package/${d.name}\n\n` +
-                    `> *𝐒𝐇𝐀𝐍𝐀 𝐃𝐄𝐕𝙰𝙻𝙾𝙿𝙴𝙴 ✹*`;
+                    `> *𝐒𝐇𝐀𝐍𝐀 𝐃𝐄𝐕𝙰𝙻𝙾𝙿𝙴𝙀 ✹*`;
 
                 await socket.sendMessage(sender, {
                     image: { url: SHANA_IMG },
@@ -2744,7 +2692,7 @@ system 24/7 Online Support 💯.\n\n` +
 
 *₊❏❜ ⋮ 🔍 Search:* ${q}
 
-> *𝐒𝐇𝐀𝐍𝐀 𝐃𝐄𝐕𝙰𝙻𝙾𝙿𝙴𝙴 ✹*`
+> *𝐒𝐇𝐀𝐍𝐀 𝐃𝐄𝐕𝙰𝙻𝙾𝙿𝙴𝙀 ✹*`
                     }, { quoted: msg });
                 } else {
                     await reply(`I cant find it !`);
